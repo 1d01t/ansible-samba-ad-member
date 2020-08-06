@@ -1,0 +1,163 @@
+---
+#required for pwd hashing --> pip install passlib
+- hosts: m1
+  remote_user: root
+  vars: 
+    required_packages: 
+      - tasksel
+      - ntp
+      - ntpstat
+      - ca-certificates
+      - dnsutils
+      - ldb-tools
+      - wget 
+      - parted
+      - htop
+      - acl
+      - nano
+      - host
+      - nfs-common
+      - pigz
+      - samba
+      - smbclient
+      - krb5-config
+      - krb5-user
+      - libpam-krb5 
+      - winbind
+      - libpam-winbind
+      - libnss-winbind
+  gather_facts: false
+  pre_tasks:
+  - name: Install python for Ansible
+    raw: bash -c "(apt -qqy update && apt install -qqy python python-apt)"
+    register: output
+    changed_when: output.stdout != ""
+  - name: Gathering Facts
+    setup:
+  tasks:
+  - name: show gatherin facts
+    debug:
+      msg: "{{ ansible_default_ipv4.address }}"
+  - name: ensure .ssh is present
+    file:
+      path: "/root/.ssh"
+      state: directory   
+  - name: enable root login
+    lineinfile: 
+      path: /etc/ssh/sshd_config
+      regexp: '^PermitRootLogin yes'
+      line: 'PermitRootLogin prohibit-password'
+  - name: deny login with pam
+    lineinfile: 
+      path: /etc/ssh/sshd_config
+      regexp: '^#ChallengeResponseAuthentication yes'
+      line: 'ChallengeResponseAuthentication no'
+  - name: deny login with password
+    lineinfile: 
+      path: /etc/ssh/sshd_config
+      regexp: '^#PasswordAuthentication no'
+      line: 'PasswordAuthentication no'
+  - name: update debian
+    apt:
+      update_cache: yes
+      upgrade: yes
+  - name: dist debian
+    apt:
+      upgrade: dist
+  - name: install required packages
+    apt: 
+      name: "{{ required_packages }}" 
+      state: present
+      update_cache: yes
+  - name: set Hostname
+    shell: hostname {{ vars_name_sambamember }}.{{ vars_subdomain }}.{{ vars_domain }}
+  - name: generate hash pass for root
+    delegate_to: localhost
+    command:  python -c "from passlib.hash import sha512_crypt; import getpass; print(sha512_crypt.hash('{{ vault_root_password_member }}'))"
+    register: hash
+  - name: change root password
+    user: 
+      name: root
+      update_password: always 
+      password: '{{ hash.stdout }}'  
+  - name: copy file krb5.conf to /etc/krb5.conf
+    template: 
+      src: "krb5.conf"
+      dest: "/etc/krb5.conf"
+  - name: copy file ntp.conf to /etc/ntp.conf
+    template: 
+      src: "ntp.conf"
+      dest: "/etc/ntp.conf"
+  - name: copy hosts file
+    template: 
+      src: "hosts"
+      dest: "/etc/hosts"
+  - name: copy interfaces file
+    template: 
+      src: "interfaces"
+      dest: "/etc/network/interfaces" 
+  - name: Configuring the DNS Resolver
+    template: 
+      src: "resolv.conf"
+      dest: "/etc/resolv.conf"
+  - name: add write protection to /etc/resolv.conf
+    shell: chattr +i /etc/resolv.conf
+  - name: add mapping samba admin to local root
+    lineinfile:
+      path: /etc/samba/user.map
+      create: yes
+      line: '!root = {{ vars_workgroup }}\Administrator'
+  - name: copy smb.conf
+    template: 
+      src: "smb.conf"
+      dest: "/etc/samba/smb.conf"
+  - name: Check if Samba member already in Domain
+    stat:
+      path: "/srv/samba/profiles"
+    register: profilesdir
+  - name: join domain if not already done
+    shell: net ads join -U administrator%{{ vault_samba_admin_pw }}
+    when: not profilesdir.stat.exists
+  - name: copy nsswitch.conf
+    template: 
+      src: "nsswitch.conf"
+      dest: "/etc/nsswitch.conf"
+  - name: stop smbd nmbd winbind 
+    shell: systemctl stop smbd nmbd winbind 
+  - name: start smbd nmbd winbind 
+    shell: systemctl start smbd nmbd winbind 
+  - name: enable smbd nmbd winbind 
+    shell: systemctl enable smbd nmbd winbind
+  - name: Set timezone to UTC
+    timezone:
+      name: UTC
+  - name: Create /srv/samba directory if it does not exist
+    file:
+      path: /srv/samba
+      state: directory
+      mode: '0770'
+      owner: "root"
+      group: "domain users"
+  - name: Create /srv/samba/profiles/ directory if it does not exist
+    file:
+      path: /srv/samba/profiles/
+      state: directory
+      mode: '1770'
+      owner: "root"
+      group: "domain users"      
+  - name: Create /srv/samba/users/ directory if it does not exist
+    file:
+      path: /srv/samba/users/
+      state: directory
+      mode: '2750'
+      owner: "root"
+      group: "domain users"
+  - name: Create /srv/samba/share directory if it does not exist
+    file:
+      path: /srv/samba/share
+      state: directory
+      mode: '0770'
+      owner: "root"
+      group: "domain users"
+  - name: Finaly reboot machine
+    reboot:
